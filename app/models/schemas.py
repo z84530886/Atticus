@@ -53,6 +53,12 @@ class Generate3DResponse(BaseModel):
     message: str = Field(..., description="Response message")
 
 
+class SeamSubmitResponse(BaseModel):
+    task_id: str = Field(..., description="Unique task identifier")
+    status: TaskStatus = Field(..., description="Task status")
+    message: str = Field(..., description="Response message")
+
+
 class QueryTaskResponse(BaseModel):
     task_id: str = Field(..., description="Unique task identifier")
     status: TaskStatus = Field(..., description="Task status")

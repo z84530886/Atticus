@@ -28,7 +28,7 @@ class Settings(BaseSettings):
     RESULTS_PATH: str = "./storage/results"
     MAX_FILE_SIZE: int = 104857600
 
-    CORS_ORIGINS: List[str] = ["http://localhost:3000", "http://localhost:8080"]
+    CORS_ORIGINS: str = "http://localhost:3000,http://localhost:8080"
 
     SECRET_KEY: str = "your-secret-key-change-this-in-production"
     ALGORITHM: str = "HS256"
