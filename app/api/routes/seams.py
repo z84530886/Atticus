@@ -1,29 +1,21 @@
-import json
 import uuid
 from pathlib import Path
 from typing import Optional
 
-from fastapi import APIRouter, BackgroundTasks, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, BackgroundTasks, File, Form, HTTPException, UploadFile, Depends
 from fastapi.responses import FileResponse
+from sqlalchemy.orm import Session
+from app.core.database import get_db
 
 from app.core.config import settings
-from app.models.schemas import File3D, QueryTaskResponse, SeamSubmitResponse, TaskStatus
-from app.tasks.seam_tasks import run_seam_task
-
-import redis
-
-redis_client = redis.Redis(
-    host=settings.REDIS_HOST,
-    port=settings.REDIS_PORT,
-    db=settings.REDIS_DB,
-    password=settings.REDIS_PASSWORD if settings.REDIS_PASSWORD else None,
-    decode_responses=True,
-)
+from app.models.schemas import QueryTaskResponse, SeamSubmitResponse, TaskStatus
+from app.services import SeamService
 
 router = APIRouter(prefix="/api/v1/seams", tags=["seams"])
 
 
 def _resolve_storage_path(p: str) -> str:
+    """Helper function for file download."""
     path = Path(p)
     if path.is_absolute():
         return str(path)
@@ -34,63 +26,34 @@ def _resolve_storage_path(p: str) -> str:
 @router.post("/submit", response_model=SeamSubmitResponse)
 async def submit_seams(
     background_tasks: BackgroundTasks,
-    points_file: UploadFile = File(...),
-    model_file: Optional[UploadFile] = File(None),
-    model_task_id: Optional[str] = Form(None),
-    model_file_type: str = Form("topologized"),
-    model_filename: Optional[str] = Form(None),
-    axis: str = Form("three_to_blender_a"),
-    points_origin: str = Form("model_bbox_center"),
-    do_imprint: int = Form(1),
+    points_file: UploadFile = File(..., description="缝合线坐标点JSON文件，包含OBJ原始坐标"),
+    model_file: Optional[UploadFile] = File(None, description="模型文件（OBJ/GLB格式），如果不上传则需要提供model_task_id"),
+    model_task_id: Optional[str] = Form(None, description="之前生成任务的ID，用于引用已生成的模型"),
+    model_file_type: str = Form("topologized", description="模型文件类型：original或topologized"),
+    model_filename: Optional[str] = Form(None, description="模型文件名"),
+    project_id: Optional[str] = Form(None, description="项目ID"),
+    db: Session = Depends(get_db),
 ):
     try:
         task_id = str(uuid.uuid4())
+        service = SeamService(db)
 
-        results_root = Path(_resolve_storage_path(settings.RESULTS_PATH))
-        out_dir = results_root / task_id / "seams"
-        out_dir.mkdir(parents=True, exist_ok=True)
+        # Create DB record
+        service.create_task_record(task_id, project_id, model_file_type, model_filename)
 
-        points_path = out_dir / "seam_points.json"
-        points_bytes = await points_file.read()
-        points_path.write_bytes(points_bytes)
+        # Save points file
+        points_path = await service.save_points_file(task_id, points_file)
 
-        if model_file is not None:
-            suffix = Path(model_file.filename or "model.glb").suffix
-            if not suffix:
-                suffix = ".glb"
-            model_path = out_dir / f"model{suffix}"
-            model_bytes = await model_file.read()
-            model_path.write_bytes(model_bytes)
-        else:
-            if not model_task_id or not model_filename:
-                raise HTTPException(
-                    status_code=400,
-                    detail="Either upload model_file or provide model_task_id + model_filename",
-                )
-
-            results_root = Path(_resolve_storage_path(settings.RESULTS_PATH))
-            model_path = results_root / str(model_task_id) / str(model_file_type) / str(model_filename)
-            if not model_path.exists():
-                raise HTTPException(status_code=404, detail=f"Model not found: {model_path}")
-
-        redis_client.hset(
-            f"task:{task_id}",
-            mapping={
-                "status": TaskStatus.PROCESSING.value,
-                "progress": "0.0",
-            },
+        # Process model file (upload or reference)
+        model_path = await service.process_model_file(
+            task_id, model_file, model_task_id, model_file_type, model_filename
         )
 
-        run_seam_task.delay(
-            task_id,
-            {
-                "model_path": str(model_path),
-                "points_path": str(points_path),
-                "axis": str(axis),
-                "points_origin": str(points_origin),
-                "do_imprint": int(do_imprint),
-            },
-        )
+        # Initialize task status in Redis
+        service.init_task_status(task_id)
+
+        # Submit to background worker
+        service.submit_seam_task(task_id, model_path, points_path)
 
         return SeamSubmitResponse(
             task_id=task_id,
@@ -126,32 +89,20 @@ async def download_seam_file(task_id: str, filename: str):
 
 
 @router.get("/task/{task_id}", response_model=QueryTaskResponse)
-async def get_seam_task_status(task_id: str):
+async def get_seam_task_status(task_id: str, db: Session = Depends(get_db)):
     try:
-        task_data = redis_client.hgetall(f"task:{task_id}")
+        service = SeamService(db)
+        task_status = service.get_task_status(task_id)
 
-        if not task_data:
+        if task_status is None:
             raise HTTPException(status_code=404, detail="Task not found")
-
-        status = TaskStatus(task_data.get("status", TaskStatus.PROCESSING.value))
-        progress = float(task_data.get("progress", "0.0"))
-        error = task_data.get("error")
-
-        result_files = None
-        if task_data.get("result_files"):
-            try:
-                parsed = json.loads(task_data["result_files"])
-                if isinstance(parsed, list):
-                    result_files = [File3D(**f) for f in parsed if isinstance(f, dict)]
-            except Exception:
-                result_files = None
 
         return QueryTaskResponse(
             task_id=task_id,
-            status=status,
-            progress=progress,
-            result_files=result_files,
-            error=error,
+            status=task_status["status"],
+            progress=task_status["progress"],
+            result_files=task_status["result_files"],
+            error=task_status["error"],
         )
 
     except HTTPException:

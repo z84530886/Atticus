@@ -1,45 +1,43 @@
 import uuid
 import os
-import json
-from fastapi import APIRouter, HTTPException, BackgroundTasks
+from fastapi import APIRouter, HTTPException, BackgroundTasks, Depends
+from sqlalchemy.orm import Session
+from app.core.database import get_db
 from fastapi.responses import FileResponse
 from app.models.schemas import (
     Generate3DRequest,
     Generate3DResponse,
     QueryTaskResponse,
-    TaskStatus,
-    File3D
+    TaskStatus
 )
-from app.tasks.generation_tasks import submit_generation_task, monitor_generation_task
+from app.services import GenerationService
 from app.core.config import settings
-import redis
-
-redis_client = redis.Redis(
-    host=settings.REDIS_HOST,
-    port=settings.REDIS_PORT,
-    db=settings.REDIS_DB,
-    password=settings.REDIS_PASSWORD if settings.REDIS_PASSWORD else None,
-    decode_responses=True
-)
 
 router = APIRouter(prefix="/api/v1/generation", tags=["generation"])
 
 
 @router.post("/generate", response_model=Generate3DResponse)
-async def generate_3d_model(request: Generate3DRequest, background_tasks: BackgroundTasks):
+async def generate_3d_model(
+    request: Generate3DRequest,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db)
+):
     try:
         task_id = str(uuid.uuid4())
+        service = GenerationService(db)
         
-        submit_generation_task.delay(task_id, request.dict())
+        # Save to DB if project_id is present
+        service.create_generation_task(request, task_id)
         
-        monitor_generation_task.delay(task_id, "")
-        
+        # Submit to background workers
+        service.submit_task(task_id, request.dict())
+
         return Generate3DResponse(
             task_id=task_id,
             status=TaskStatus.PROCESSING,
             message="3D model generation task submitted successfully"
         )
-    
+
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
@@ -67,30 +65,20 @@ async def download_file(task_id: str, file_type: str, filename: str):
 
 
 @router.get("/task/{task_id}", response_model=QueryTaskResponse)
-async def get_task_status(task_id: str):
+async def get_task_status(task_id: str, db: Session = Depends(get_db)):
     try:
-        task_data = redis_client.hgetall(f"task:{task_id}")
+        service = GenerationService(db)
+        task_status = service.get_task_status(task_id)
         
-        if not task_data:
+        if task_status is None:
             raise HTTPException(status_code=404, detail="Task not found")
-        
-        status = TaskStatus(task_data.get("status", TaskStatus.PROCESSING.value))
-        progress = float(task_data.get("progress", "0.0"))
-        error = task_data.get("error")
-        
-        result_files = None
-        if task_data.get("result_files"):
-            try:
-                result_files = [File3D(**f) for f in json.loads(task_data["result_files"])]
-            except:
-                pass
         
         return QueryTaskResponse(
             task_id=task_id,
-            status=status,
-            progress=progress,
-            result_files=result_files,
-            error=error
+            status=task_status["status"],
+            progress=task_status["progress"],
+            result_files=task_status["result_files"],
+            error=task_status["error"]
         )
     
     except HTTPException:

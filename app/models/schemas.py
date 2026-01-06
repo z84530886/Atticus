@@ -1,5 +1,6 @@
 from enum import Enum
 from pydantic import BaseModel, Field
+from datetime import datetime
 from typing import Optional, List
 
 
@@ -39,6 +40,7 @@ class Generate3DRequest(BaseModel):
     result_format: str = Field("obj", description="Output format: obj or glb")
     enable_pbr: bool = Field(True, description="Enable PBR materials")
     enable_geometry: bool = Field(True, description="Enable geometry optimization")
+    project_id: Optional[str] = Field(None, description="Project ID to associate with")
 
 
 class File3D(BaseModel):
@@ -65,3 +67,35 @@ class QueryTaskResponse(BaseModel):
     progress: float = Field(..., ge=0.0, le=100.0, description="Progress percentage")
     result_files: Optional[List[File3D]] = Field(None, description="Generated 3D files")
     error: Optional[str] = Field(None, description="Error message if failed")
+
+
+# --- New Schemas for DB Integration ---
+
+class ProjectBase(BaseModel):
+    title: str
+    description: Optional[str] = None
+    is_public: bool = False
+
+class ProjectCreate(ProjectBase):
+    pass
+
+class ProjectResponse(ProjectBase):
+    id: str
+    user_id: str
+    status: str
+    cover_image_url: Optional[str]
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+class AssetResponse(BaseModel):
+    id: str
+    type: str
+    role: str
+    url: str
+    created_at: datetime
+
+    class Config:
+        from_attributes = True

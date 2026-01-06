@@ -1,7 +1,12 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.core.config import settings
-from app.api.routes import generation, seams
+from app.api.routes import generation, seams, projects
+from app.core.database import engine
+from app.models import orm
+
+# Create DB tables
+orm.Base.metadata.create_all(bind=engine)
 
 import json
 
@@ -29,6 +34,7 @@ app.add_middleware(
 
 app.include_router(generation.router)
 app.include_router(seams.router)
+app.include_router(projects.router)
 
 
 @app.get("/")

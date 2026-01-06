@@ -38,12 +38,21 @@ def _run_blender(*, blender_exe: str, script_path: str, argv: list, log_path: Pa
 
 @celery_app.task(name="app.tasks.seam_tasks.run_seam_task")
 def run_seam_task(task_id: str, payload: dict):
+    """
+    处理缝合线标记任务。
+    
+    直接使用前端传来的OBJ原始坐标，通过Blender的imprint_seams_from_points.py脚本
+    标记缝合线（对于已有边直接标记，对于不存在的边先创建再标记）。
+    
+    Args:
+        task_id: 任务ID
+        payload: 包含以下字段的字典
+            - model_path: 模型文件路径（OBJ或GLB/GLTF格式）
+            - points_path: 缝合线坐标点JSON文件路径
+    """
     try:
         model_path = str(payload["model_path"])
         points_path = str(payload["points_path"])
-        axis = str(payload.get("axis", "three_to_blender_a"))
-        points_origin = str(payload.get("points_origin", "model_bbox_center"))
-        do_imprint = int(payload.get("do_imprint", 1))
 
         results_root = Path(_resolve_path_relative_to_atticus(settings.RESULTS_PATH))
         out_dir = results_root / str(task_id) / "seams"
@@ -52,21 +61,14 @@ def run_seam_task(task_id: str, payload: dict):
         blender_exe = _resolve_path_relative_to_atticus(settings.BLENDER_PATH)
         scripts_dir = Path(_resolve_path_relative_to_atticus(settings.BLENDER_SCRIPTS_PATH))
 
-        snap_script = scripts_dir / "snap_points_and_draw_curve.py"
         imprint_script = scripts_dir / "imprint_seams_from_points.py"
 
         if not Path(model_path).exists():
-            raise FileNotFoundError(model_path)
+            raise FileNotFoundError(f"Model file not found: {model_path}")
         if not Path(points_path).exists():
-            raise FileNotFoundError(points_path)
-        if not snap_script.exists():
-            raise FileNotFoundError(str(snap_script))
-        if do_imprint != 0 and not imprint_script.exists():
-            raise FileNotFoundError(str(imprint_script))
-
-        snapped_json = out_dir / "snapped_points.json"
-        curve_blend = out_dir / "curve_snapped.blend"
-        snap_log = out_dir / "blender_snap.log"
+            raise FileNotFoundError(f"Points file not found: {points_path}")
+        if not imprint_script.exists():
+            raise FileNotFoundError(f"Blender script not found: {imprint_script}")
 
         redis_client.hset(
             f"task:{task_id}",
@@ -76,32 +78,36 @@ def run_seam_task(task_id: str, payload: dict):
             },
         )
 
+        # 直接使用原始坐标进行缝合线标记
+        imprint_blend = out_dir / "seam_imprinted.blend"
+        imprint_log = out_dir / "blender_imprint.log"
+
         _run_blender(
             blender_exe=blender_exe,
-            script_path=str(snap_script),
+            script_path=str(imprint_script),
             argv=[
                 "--input_model",
                 model_path,
                 "--points_json",
                 points_path,
-                "--out_points_json",
-                str(snapped_json),
                 "--out_blend",
-                str(curve_blend),
-                "--axis",
-                axis,
-                "--points_origin",
-                points_origin,
+                str(imprint_blend),
+                "--curve_name",
+                "SeamCurve",
+                "--preview_name",
+                "SeamPreviewEdges",
+                "--preview_in_front",
+                "1",
                 "--quit",
             ],
-            log_path=snap_log,
+            log_path=imprint_log,
         )
 
         redis_client.hset(
             f"task:{task_id}",
             mapping={
                 "status": TaskStatus.PROCESSING.value,
-                "progress": "50.0",
+                "progress": "80.0",
             },
         )
 
@@ -109,62 +115,14 @@ def run_seam_task(task_id: str, payload: dict):
             {
                 "preview_image_url": "",
                 "type": "blend",
-                "url": f"/api/v1/seams/files/{task_id}/{curve_blend.name}",
-            },
-            {
-                "preview_image_url": "",
-                "type": "json",
-                "url": f"/api/v1/seams/files/{task_id}/{snapped_json.name}",
+                "url": f"/api/v1/seams/files/{task_id}/{imprint_blend.name}",
             },
             {
                 "preview_image_url": "",
                 "type": "log",
-                "url": f"/api/v1/seams/files/{task_id}/{snap_log.name}",
+                "url": f"/api/v1/seams/files/{task_id}/{imprint_log.name}",
             },
         ]
-
-        if do_imprint != 0:
-            imprint_blend = out_dir / "seam_imprinted_preview.blend"
-            imprint_log = out_dir / "blender_imprint.log"
-
-            _run_blender(
-                blender_exe=blender_exe,
-                script_path=str(imprint_script),
-                argv=[
-                    "--input_model",
-                    model_path,
-                    "--points_json",
-                    str(snapped_json),
-                    "--out_blend",
-                    str(imprint_blend),
-                    "--curve_name",
-                    "SeamCurve_Imprint",
-                    "--preview_name",
-                    "SeamPreviewEdges",
-                    "--preview_in_front",
-                    "1",
-                    "--quit",
-                ],
-                log_path=imprint_log,
-            )
-
-            result_files.insert(
-                0,
-                {
-                    "preview_image_url": "",
-                    "type": "blend",
-                    "url": f"/api/v1/seams/files/{task_id}/{imprint_blend.name}",
-                },
-            )
-
-            result_files.insert(
-                1,
-                {
-                    "preview_image_url": "",
-                    "type": "log",
-                    "url": f"/api/v1/seams/files/{task_id}/{imprint_log.name}",
-                },
-            )
 
         redis_client.hset(
             f"task:{task_id}",

@@ -12,6 +12,8 @@ class Settings(BaseSettings):
     BLENDER_PATH: str = "blender"
     BLENDER_SCRIPTS_PATH: str = "./blender_scripts"
 
+    DATABASE_URL: str = "sqlite:///./atticus.db"
+
     REDIS_HOST: str = "localhost"
     REDIS_PORT: int = 6379
     REDIS_DB: int = 0
